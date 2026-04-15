@@ -70,7 +70,7 @@ MJPEG)   PCM stdout)  mouse)
 ## Installation
 
 ```bash
-git clone https://github.com/VOTRE_USER/Speedystopia-RemoteView.git
+git clone https://github.com/Speedystopia/Speedystopia-RemoteView.git
 cd Speedystopia-RemoteView
 ```
 
