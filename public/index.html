@@ -100,6 +100,7 @@
         var controls = $('controls');
         var connected = false;
         var hideTimer = null;
+        var controlEnabled = false;
 
         // --- Audio engine (WebSocket + Web Audio API) ---
         var audioCtx = null;
@@ -245,6 +246,7 @@
         // --- Button handlers ---
         $('startBtn').addEventListener('click', function() {
             startAudio();
+            if (controlEnabled) connectInput();
             enterFullscreen();
             overlay.classList.add('hidden');
             showControls();
@@ -287,7 +289,7 @@
                 console.log('Input WS: closed');
                 inputWs = null;
                 updateDebug();
-                setTimeout(connectInput, 2000);
+                if (controlEnabled) setTimeout(connectInput, 2000);
             };
             inputWs.onerror = function() {
                 console.error('Input WS: error');
@@ -295,6 +297,7 @@
         }
 
         function sendInput(cmd) {
+            if (!controlEnabled) return;
             if (inputWs && inputWs.readyState === WebSocket.OPEN) {
                 inputWs.send(JSON.stringify(cmd));
             }
@@ -427,7 +430,10 @@
 
         // --- Boot ---
         startStream();
-        connectInput();
+        // Fetch control config from server
+        fetch('/api/config').then(function(r) { return r.json(); }).then(function(cfg) {
+            controlEnabled = cfg.control;
+        }).catch(function() {});
     </script>
 </body>
 </html>

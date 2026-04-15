@@ -8,6 +8,7 @@ const audio = require('./src/audio');
 const input = require('./src/input');
 
 const PORT = 3000;
+const CONTROL_ENABLED = !process.argv.includes('--no-control');
 const app = express();
 const server = http.createServer(app);
 
@@ -29,7 +30,7 @@ server.on('upgrade', (req, socket, head) => {
     const { pathname } = new URL(req.url, `http://${req.headers.host}`);
     if (pathname === '/audio-ws') {
         audio.handleUpgrade(req, socket, head);
-    } else if (pathname === '/input-ws') {
+    } else if (pathname === '/input-ws' && CONTROL_ENABLED) {
         input.handleUpgrade(req, socket, head);
     } else {
         socket.destroy();
@@ -49,6 +50,10 @@ app.post('/api/stop', express.json(), (req, res) => {
     audio.stop();
     input.stop();
     res.json({ status: 'stopped' });
+});
+
+app.get('/api/config', (req, res) => {
+    res.json({ control: CONTROL_ENABLED });
 });
 
 app.get('/api/status', (req, res) => {
@@ -89,5 +94,10 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log('');
     video.start();
     audio.start();
-    input.start();
+    if (CONTROL_ENABLED) {
+        input.start();
+        console.log('[server] Controle a distance: ACTIF');
+    } else {
+        console.log('[server] Controle a distance: DESACTIVE');
+    }
 });

@@ -64,8 +64,11 @@ def start_server():
     append_log("Demarrage du serveur...")
 
     try:
+        cmd = ["node", "server.js"]
+        if not control_var.get():
+            cmd.append("--no-control")
         server_process = subprocess.Popen(
-            ["node", "server.js"],
+            cmd,
             cwd=SCRIPT_DIR,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -168,6 +171,15 @@ btn_stop = tk.Button(btn_frame, text="■  Arreter", font=("Segoe UI", 11, "bold
                      relief=tk.FLAT, padx=20, pady=6, cursor="hand2",
                      state=tk.DISABLED, command=stop_server)
 btn_stop.pack(side=tk.LEFT)
+
+# Control toggle
+control_var = tk.BooleanVar(value=True)
+chk_control = tk.Checkbutton(btn_frame, text="Controle a distance",
+                             variable=control_var, font=("Segoe UI", 10),
+                             fg=FG, bg=BG, selectcolor="#16213e",
+                             activebackground=BG, activeforeground=FG,
+                             cursor="hand2")
+chk_control.pack(side=tk.LEFT, padx=(20, 0))
 
 # Log area
 log_frame = tk.Frame(root, bg=BG)
