@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Speedystopia</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        #stream {
+            width: 100vw;
+            height: 100vh;
+            object-fit: contain;
+            display: block;
+            background: #000;
+            touch-action: none;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        /* --- Overlay --- */
+        #overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            background: rgba(0, 0, 0, 0.85); z-index: 100; transition: opacity 0.4s ease;
+        }
+        #overlay.hidden { opacity: 0; pointer-events: none; }
+
+        .title { font-size: 2rem; font-weight: 700; margin-bottom: 1rem; }
+        .subtitle { font-size: 0.95rem; color: #888; margin-bottom: 2rem; }
+        #status { font-size: 1rem; color: #aaa; margin-bottom: 1.5rem; }
+        #status.connected { color: #4ade80; }
+        #status.error { color: #f87171; }
+
+        .btn {
+            padding: 0.8rem 2.5rem; border: none; border-radius: 8px;
+            font-size: 1.1rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
+        }
+        .btn-primary { background: #6366f1; color: #fff; }
+        .btn-primary:hover { background: #4f46e5; transform: scale(1.03); }
+        .btn-primary:disabled { background: #333; color: #666; cursor: not-allowed; transform: none; }
+
+        .spinner {
+            width: 40px; height: 40px; border: 3px solid #333;
+            border-top-color: #6366f1; border-radius: 50%;
+            animation: spin 0.8s linear infinite; margin-bottom: 1rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* --- Controls bar --- */
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 12px; align-items: center;
+            background: rgba(0, 0, 0, 0.7); padding: 8px 16px;
+            border-radius: 12px; z-index: 200;
+            opacity: 0; transition: opacity 0.3s;
+            backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+        }
+        #controls.visible { opacity: 1; }
+
+        .ctrl-btn {
+            background: rgba(255,255,255,0.1); border: none; color: #fff;
+            padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+        }
+        .ctrl-btn:hover { background: rgba(255,255,255,0.2); }
+    </style>
+</head>
+<body>
+    <img id="stream" alt="">
+
+    <div id="overlay">
+        <div class="title">Speedystopia</div>
+        <div class="subtitle">Capture ecran temps reel</div>
+        <div class="spinner" id="spinner"></div>
+        <div id="status">Connexion au flux...</div>
+        <button class="btn btn-primary" id="startBtn" disabled>Lancer en plein ecran</button>
+    </div>
+
+    <div id="controls">
+        <button class="ctrl-btn" id="muteBtn">Son: ON</button>
+        <button class="ctrl-btn" id="fullscreenBtn">Plein ecran</button>
+        <button class="ctrl-btn" id="optionsBtn">Options</button>
+    </div>
+
+    <script>
+        var $ = function(id) { return document.getElementById(id); };
+        var stream = $('stream');
+        var overlay = $('overlay');
+        var statusEl = $('status');
+        var spinner = $('spinner');
+        var controls = $('controls');
+        var connected = false;
+        var hideTimer = null;
+
+        // --- Audio engine (WebSocket + Web Audio API) ---
+        var audioCtx = null;
+        var gainNode = null;
+        var muted = false;
+
+        var audioWs = null;
+        var audioRetries = 0;
+        var MAX_AUDIO_RETRIES = 5;
+
+        function startAudio() {
+            if (audioCtx) return;
+            if (audioRetries >= MAX_AUDIO_RETRIES) {
+                console.warn('Audio: max retries reached, giving up');
+                return;
+            }
+
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+            } catch(e) {
+                console.error('AudioContext error:', e);
+                return;
+            }
+            gainNode = audioCtx.createGain();
+            gainNode.gain.value = muted ? 0 : 1;
+            gainNode.connect(audioCtx.destination);
+
+            // Ring buffer: ~1s at 44100Hz stereo
+            var RING_SIZE = 44100 * 2 * 2;
+            var ring = new Float32Array(RING_SIZE);
+            var wPos = 0;
+
+            // ScriptProcessor for playback (universal Safari support)
+            var processor = audioCtx.createScriptProcessor(2048, 0, 2);
+            var rPos = 0;
+
+            processor.onaudioprocess = function(e) {
+                var outL = e.outputBuffer.getChannelData(0);
+                var outR = e.outputBuffer.getChannelData(1);
+                var frames = outL.length;
+
+                var avail = wPos >= rPos ? wPos - rPos : RING_SIZE - rPos + wPos;
+
+                if (avail >= frames * 2) {
+                    for (var i = 0; i < frames; i++) {
+                        outL[i] = ring[rPos]; rPos = (rPos + 1) % RING_SIZE;
+                        outR[i] = ring[rPos]; rPos = (rPos + 1) % RING_SIZE;
+                    }
+                } else {
+                    for (var i = 0; i < frames; i++) { outL[i] = 0; outR[i] = 0; }
+                }
+            };
+            processor.connect(gainNode);
+
+            // WebSocket for receiving raw PCM
+            var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            audioWs = new WebSocket(proto + '//' + location.host + '/audio-ws');
+            audioWs.binaryType = 'arraybuffer';
+            var wsOpened = false;
+
+            audioWs.onopen = function() {
+                wsOpened = true;
+                audioRetries = 0;
+                console.log('Audio WS connected');
+            };
+
+            audioWs.onmessage = function(e) {
+                var floats = new Float32Array(e.data);
+                for (var i = 0; i < floats.length; i++) {
+                    ring[wPos] = floats[i];
+                    wPos = (wPos + 1) % RING_SIZE;
+                }
+            };
+
+            audioWs.onclose = function() {
+                console.log('Audio WS closed (was open: ' + wsOpened + ')');
+                try { processor.disconnect(); } catch(e) {}
+                try { audioCtx.close(); } catch(e) {}
+                audioCtx = null;
+                gainNode = null;
+                audioWs = null;
+                if (!wsOpened) audioRetries++;
+                var delay = wsOpened ? 3000 : 5000;
+                setTimeout(startAudio, delay);
+            };
+
+            audioWs.onerror = function(e) {
+                console.error('Audio WS error');
+            };
+
+            console.log('Audio: connecting...');
+        }
+
+        // --- Video stream ---
+        function startStream() {
+            stream.src = '/stream?t=' + Date.now();
+        }
+
+        stream.onload = function() {
+            if (!connected) {
+                connected = true;
+                statusEl.textContent = 'Flux actif - Pret !';
+                statusEl.className = 'connected';
+                spinner.style.display = 'none';
+                $('startBtn').disabled = false;
+            }
+        };
+
+        stream.onerror = function() {
+            connected = false;
+            statusEl.textContent = 'Deconnecte - reconnexion...';
+            statusEl.className = 'error';
+            spinner.style.display = 'block';
+            $('startBtn').disabled = true;
+            setTimeout(startStream, 2000);
+        };
+
+        // --- Fullscreen ---
+        function enterFullscreen() {
+            var el = document.documentElement;
+            if (el.requestFullscreen) el.requestFullscreen().catch(function(){});
+            else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+        }
+
+        function exitFullscreen() {
+            if (document.exitFullscreen) document.exitFullscreen();
+            else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+        }
+
+        function isFullscreen() {
+            return !!(document.fullscreenElement || document.webkitFullscreenElement);
+        }
+
+        // --- Controls visibility ---
+        function showControls() {
+            controls.classList.add('visible');
+            clearTimeout(hideTimer);
+            hideTimer = setTimeout(function() {
+                controls.classList.remove('visible');
+            }, 3000);
+        }
+
+        // --- Button handlers ---
+        $('startBtn').addEventListener('click', function() {
+            startAudio();
+            enterFullscreen();
+            overlay.classList.add('hidden');
+            showControls();
+        });
+
+        $('muteBtn').addEventListener('click', function() {
+            muted = !muted;
+            if (gainNode) gainNode.gain.value = muted ? 0 : 1;
+            this.textContent = muted ? 'Son: OFF' : 'Son: ON';
+        });
+
+        $('fullscreenBtn').addEventListener('click', function() {
+            if (isFullscreen()) exitFullscreen();
+            else enterFullscreen();
+        });
+
+        $('optionsBtn').addEventListener('click', function() {
+            overlay.classList.remove('hidden');
+            exitFullscreen();
+        });
+
+        // Show controls on interaction (3 fingers = show controls)
+        document.addEventListener('mousemove', function() {
+            if (!overlay.classList.contains('hidden')) return;
+            showControls();
+        });
+
+        // --- Input control (touch -> mouse) ---
+        var inputWs = null;
+
+        function connectInput() {
+            var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            console.log('Input WS: connecting to ' + proto + '//' + location.host + '/input-ws');
+            inputWs = new WebSocket(proto + '//' + location.host + '/input-ws');
+            inputWs.onopen = function() {
+                console.log('Input WS: connected');
+                updateDebug();
+            };
+            inputWs.onclose = function() {
+                console.log('Input WS: closed');
+                inputWs = null;
+                updateDebug();
+                setTimeout(connectInput, 2000);
+            };
+            inputWs.onerror = function() {
+                console.error('Input WS: error');
+            };
+        }
+
+        function sendInput(cmd) {
+            if (inputWs && inputWs.readyState === WebSocket.OPEN) {
+                inputWs.send(JSON.stringify(cmd));
+            }
+        }
+
+        // --- Debug overlay (bottom-left, small) ---
+        var debugEl = document.createElement('div');
+        debugEl.style.cssText = 'position:fixed;bottom:4px;left:4px;color:#0f0;font:10px monospace;z-index:9999;opacity:0.6;pointer-events:none;';
+        document.body.appendChild(debugEl);
+        var lastTouch = '';
+
+        function updateDebug() {
+            var inputState = inputWs ? (inputWs.readyState === WebSocket.OPEN ? 'OK' : 'connecting') : 'off';
+            debugEl.textContent = 'input:' + inputState + ' ' + lastTouch;
+        }
+
+        // Map touch position on <img> to normalized screen coords (0-1)
+        function touchToNorm(touchX, touchY) {
+            var rect = stream.getBoundingClientRect();
+            var imgW = rect.width;
+            var imgH = rect.height;
+            // object-fit: contain — compute actual rendered image area
+            var streamRatio = 16 / 9;
+            var containerRatio = imgW / imgH;
+            var renderW, renderH, offsetX, offsetY;
+            if (containerRatio > streamRatio) {
+                renderH = imgH;
+                renderW = imgH * streamRatio;
+                offsetX = (imgW - renderW) / 2;
+                offsetY = 0;
+            } else {
+                renderW = imgW;
+                renderH = imgW / streamRatio;
+                offsetX = 0;
+                offsetY = (imgH - renderH) / 2;
+            }
+            var x = (touchX - rect.left - offsetX) / renderW;
+            var y = (touchY - rect.top - offsetY) / renderH;
+            return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+        }
+
+        // Gesture state
+        var longPressTimer = null;
+        var touchStartX = 0;
+        var touchStartY = 0;
+        var touchStartTime = 0;
+        var touchMoved = false;
+        var lastMoveTime = 0;
+
+        stream.addEventListener('touchstart', function(e) {
+            if (e.touches.length === 3) { showControls(); return; }
+
+            // 2-finger tap = right click
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                var mid = touchToNorm(
+                    (e.touches[0].clientX + e.touches[1].clientX) / 2,
+                    (e.touches[0].clientY + e.touches[1].clientY) / 2
+                );
+                sendInput({ type: 'move', x: mid.x, y: mid.y });
+                sendInput({ type: 'click', button: 'right' });
+                lastTouch = 'right-click (2f)';
+                updateDebug();
+                clearTimeout(longPressTimer);
+                return;
+            }
+
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+
+            var t = e.touches[0];
+            touchStartX = t.clientX;
+            touchStartY = t.clientY;
+            touchStartTime = Date.now();
+            touchMoved = false;
+
+            // Move mouse to touch position immediately
+            var pos = touchToNorm(t.clientX, t.clientY);
+            sendInput({ type: 'move', x: pos.x, y: pos.y });
+            lastTouch = 'start ' + pos.x.toFixed(2) + ',' + pos.y.toFixed(2);
+            updateDebug();
+
+            // Long press = right click (backup)
+            clearTimeout(longPressTimer);
+            longPressTimer = setTimeout(function() {
+                if (!touchMoved) {
+                    sendInput({ type: 'click', button: 'right' });
+                    lastTouch = 'right-click (long)';
+                    updateDebug();
+                    touchMoved = true; // prevent tap on release
+                }
+            }, 500);
+        }, { passive: false });
+
+        stream.addEventListener('touchmove', function(e) {
+            if (e.touches.length !== 1) return;
+            e.preventDefault();
+
+            var t = e.touches[0];
+            var dx = t.clientX - touchStartX;
+            var dy = t.clientY - touchStartY;
+            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                touchMoved = true;
+                clearTimeout(longPressTimer);
+            }
+
+            // Throttle to ~60fps
+            var now = Date.now();
+            if (now - lastMoveTime < 16) return;
+            lastMoveTime = now;
+
+            var pos = touchToNorm(t.clientX, t.clientY);
+            sendInput({ type: 'move', x: pos.x, y: pos.y });
+        }, { passive: false });
+
+        stream.addEventListener('touchend', function(e) {
+            e.preventDefault();
+            clearTimeout(longPressTimer);
+
+            if (touchMoved) return; // Was a drag or long-press, not a tap
+
+            // Single tap = left click (finger didn't move, touch was short)
+            var duration = Date.now() - touchStartTime;
+            if (duration < 300) {
+                sendInput({ type: 'click', button: 'left' });
+                lastTouch = 'left-click';
+                updateDebug();
+            }
+        }, { passive: false });
+
+        // --- Boot ---
+        startStream();
+        connectInput();
+    </script>
+</body>
+</html>

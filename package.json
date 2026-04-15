@@ -1,0 +1,13 @@
+{
+  "name": "speedystopia",
+  "version": "1.0.0",
+  "description": "Screen and audio capture streaming to localhost",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.20.0"
+  }
+}
